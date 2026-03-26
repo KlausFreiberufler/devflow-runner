@@ -77,9 +77,8 @@ export class DevFlowClient {
    */
   async initSession(flowId) {
     const data = await this.request('POST', '/api/agent-sessions/init', { flowId });
-    if (data.sessionId) {
-      this.sessionId = data.sessionId;
-    }
+    // Backend returns session.id, not sessionId
+    this.sessionId = data.sessionId || data.session?.id || null;
     return data;
   }
 

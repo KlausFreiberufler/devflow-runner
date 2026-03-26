@@ -101,7 +101,8 @@ export class Runner {
     })
 
     if (result.exitCode !== 0) {
-      await this.log.warn(`${this.adapter.name} exited with code ${result.exitCode}`)
+      const errSnippet = (result.stderr || result.stdout || '').slice(-500)
+      await this.log.warn(`${this.adapter.name} exited with code ${result.exitCode}: ${errSnippet}`)
     }
 
     const verifications = step.skill?.verificationsJson || []
