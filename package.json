@@ -1,0 +1,26 @@
+{
+  "name": "@devflow/runner",
+  "version": "0.1.0",
+  "description": "Autonomous flow orchestration for DevFlow — spawns AI tools, verifies objectively, self-repairs on failure",
+  "type": "module",
+  "bin": {
+    "devflow-run": "./bin/devflow-run.js"
+  },
+  "main": "src/runner.js",
+  "scripts": {
+    "start": "node bin/devflow-run.js",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "commander": "^12.0.0"
+  },
+  "devDependencies": {
+    "vitest": "^2.0.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "author": "DevFlow",
+  "license": "MIT"
+}
