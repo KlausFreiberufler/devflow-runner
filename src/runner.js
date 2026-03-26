@@ -103,6 +103,11 @@ export class Runner {
     if (result.exitCode !== 0) {
       const errSnippet = (result.stderr || result.stdout || '').slice(-500)
       await this.log.warn(`${this.adapter.name} exited with code ${result.exitCode}: ${errSnippet}`)
+      // If Claude didn't produce any output and failed, don't advance
+      if (!result.stdout?.trim()) {
+        await this.log.error(`${this.adapter.name} produced no output. Skipping phase advance.`)
+        return
+      }
     }
 
     const verifications = step.skill?.verificationsJson || []
@@ -112,7 +117,12 @@ export class Runner {
     }
 
     await this.log.step('✅', `Step ${step.pipelineStep} (${step.phase}) complete`)
-    await this.client.updateFlow(flowId, { phaseComplete: true })
+    try {
+      const updateResult = await this.client.updateFlow(flowId, { phaseComplete: true })
+      await this.log.step('📋', `Phase advanced: ${JSON.stringify(updateResult?.current_state || updateResult?.currentState || 'ok').slice(0, 100)}`)
+    } catch (err) {
+      await this.log.error(`Phase advance failed: ${err.message}`)
+    }
   }
 
   async verifyAndRepair(step, flow, flowId, verifications) {

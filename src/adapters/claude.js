@@ -6,9 +6,22 @@ export class ClaudeAdapter extends BaseAdapter {
     super('claude');
   }
 
+  // Map full model IDs to Claude CLI short names
+  resolveModel(model) {
+    if (!model) return 'sonnet';
+    const map = {
+      'claude-opus-4-6': 'opus',
+      'claude-sonnet-4-6': 'sonnet',
+      'claude-sonnet-4': 'sonnet',
+      'claude-haiku-4-5': 'haiku',
+      'claude-haiku-4-5-20251001': 'haiku',
+    };
+    return map[model] || model;
+  }
+
   buildArgs(prompt, config = {}) {
     const args = [
-      '--model', config.model || 'sonnet',
+      '--model', this.resolveModel(config.model),
       '-p', prompt,
     ];
 
@@ -28,7 +41,10 @@ export class ClaudeAdapter extends BaseAdapter {
       let stdout = '';
       let stderr = '';
 
-      const child = spawn('claude', args, { cwd });
+      const child = spawn('claude', args, {
+        cwd,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
 
       const timer = setTimeout(() => {
         child.kill('SIGTERM');
