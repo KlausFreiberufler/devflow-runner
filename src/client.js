@@ -128,6 +128,23 @@ export class DevFlowClient {
   // ---------------------------------------------------------------------------
 
   /**
+   * Resolve a display ID (e.g. "DF-42") to the actual flow ID.
+   * If the input is already a UUID-style ID, returns it unchanged.
+   *
+   * @param {string} flowIdOrDisplayId
+   * @returns {Promise<string>} — actual flow ID
+   */
+  async resolveFlowId(flowIdOrDisplayId) {
+    if (!flowIdOrDisplayId.match(/^[A-Z]+-\d+$/i)) return flowIdOrDisplayId;
+    const flows = await this.listFlows();
+    const found = (Array.isArray(flows) ? flows : []).find(
+      f => f.displayId === flowIdOrDisplayId || f.display_id === flowIdOrDisplayId
+    );
+    if (!found) throw new Error(`Flow ${flowIdOrDisplayId} not found`);
+    return found.id;
+  }
+
+  /**
    * Fetch a single flow by ID.
    *
    * @param {string} flowId

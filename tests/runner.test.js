@@ -241,19 +241,12 @@ describe('Runner', () => {
   })
 
   describe('Dry run', () => {
-    it('should not spawn adapter in dry run mode', async () => {
-      let callCount = 0
+    it('should not spawn adapter in dry run mode and stop via loop protection', async () => {
       const client = createMockClient({
-        getNextStep: vi.fn().mockImplementation(() => {
-          callCount++
-          if (callCount === 1) {
-            return {
-              flowState: 'in_progress', pipelineStep: 'implementation', phase: 'action',
-              actor: 'agent', gate: { blocked: false },
-              skill: { prompt: 'Impl', name: 'test' },
-            }
-          }
-          return { flowState: 'done' }
+        getNextStep: vi.fn().mockResolvedValue({
+          flowState: 'in_progress', pipelineStep: 'implementation', phase: 'action',
+          actor: 'agent', gate: { blocked: false },
+          skill: { prompt: 'Impl', name: 'test' },
         }),
       })
       const adapter = createMockAdapter()
@@ -262,7 +255,7 @@ describe('Runner', () => {
       await runner.runFlow('f-1')
 
       expect(adapter.spawn).not.toHaveBeenCalled()
-      expect(client.updateFlow).toHaveBeenCalled()
+      expect(client.updateFlow).not.toHaveBeenCalled()
     })
   })
 })

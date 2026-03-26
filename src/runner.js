@@ -19,8 +19,25 @@ export class Runner {
 
     await this.log.step('🚀', `Starting runner for ${flow.displayId}: "${flow.summary}"`)
 
+    let lastStepKey = null
+    let sameStepCount = 0
+    const MAX_SAME_STEP = 5
+
     while (true) {
       const step = await this.client.getNextStep(flowId)
+
+      // Loop protection: detect if we're stuck on the same step
+      const stepKey = `${step.flowState}:${step.pipelineStep}:${step.phase}`
+      if (stepKey === lastStepKey) {
+        sameStepCount++
+        if (sameStepCount >= MAX_SAME_STEP) {
+          await this.log.error(`Stuck on step ${stepKey} for ${MAX_SAME_STEP} iterations. Stopping.`)
+          break
+        }
+      } else {
+        sameStepCount = 0
+        lastStepKey = stepKey
+      }
 
       if (step.flowState === 'done') {
         await this.log.step('🎉', `Flow ${flow.displayId} completed!`)
@@ -73,8 +90,7 @@ export class Runner {
 
     if (this.dryRun) {
       await this.log.step('🔍', `[DRY RUN] Would spawn ${this.adapter.name} with ${prompt.length} char prompt`)
-      await this.client.updateFlow(flowId, { phaseComplete: true })
-      return
+      return  // Don't call API in dry-run — just log and return
     }
 
     await this.log.step('🤖', `Spawning ${this.adapter.name}...`)
@@ -181,7 +197,8 @@ export async function run(flowId, options = {}) {
   })
 
   if (flowId) {
-    await runner.runFlow(flowId)
+    const resolvedId = await client.resolveFlowId(flowId)
+    await runner.runFlow(resolvedId)
   } else if (options.all) {
     console.log('--all mode not yet implemented (Phase 2)')
   } else if (options.watch) {
