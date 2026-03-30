@@ -1,5 +1,6 @@
 import { buildPrompt, buildRepairPrompt } from './prompt-builder.js'
 import { Logger } from './utils/logger.js'
+import { generateMcpConfig, cleanupMcpConfig } from './utils/mcp-config.js'
 
 export class Runner {
   constructor(client, adapter, verifier, options = {}) {
@@ -9,6 +10,8 @@ export class Runner {
     this.maxRetries = options.maxRetries || 3
     this.untilGate = options.untilGate || false
     this.dryRun = options.dryRun || false
+    this.mcpServerCommand = options.mcpServerCommand || 'npx devflow-mcp'
+    this.apiUrl = options.apiUrl || 'https://api.app.dev-flow.tech'
     this.log = new Logger(client)
   }
 
@@ -93,39 +96,49 @@ export class Runner {
       return  // Don't call API in dry-run — just log and return
     }
 
-    await this.log.step('🤖', `Spawning ${this.adapter.name}...`)
-    const result = await this.adapter.spawn(prompt, {
-      model: step.skill?.agentModel || 'sonnet',
-      mcpConfig: this.getMcpConfigPath(),
-      workingDir: process.cwd(),
+    const workingDir = process.cwd()
+    const mcpConfigPath = generateMcpConfig({
+      workingDir,
+      apiUrl: this.apiUrl,
+      mcpServerCommand: this.mcpServerCommand,
     })
 
-    if (result.exitCode !== 0) {
-      const errSnippet = (result.stderr || result.stdout || '').slice(-500)
-      await this.log.warn(`${this.adapter.name} exited with code ${result.exitCode}: ${errSnippet}`)
-      // If Claude didn't produce any output and failed, don't advance
-      if (!result.stdout?.trim()) {
-        await this.log.error(`${this.adapter.name} produced no output. Skipping phase advance.`)
-        return
-      }
-    }
-
-    const verifications = step.skill?.verificationsJson || []
-    if (verifications.length > 0) {
-      const passed = await this.verifyAndRepair(step, flow, flowId, verifications)
-      if (!passed) return
-    }
-
-    await this.log.step('✅', `Step ${step.pipelineStep} (${step.phase}) complete`)
+    await this.log.step('🤖', `Spawning ${this.adapter.name}...`)
     try {
-      const updateResult = await this.client.updateFlow(flowId, { phaseComplete: true })
-      await this.log.step('📋', `Phase advanced: ${JSON.stringify(updateResult?.current_state || updateResult?.currentState || 'ok').slice(0, 100)}`)
-    } catch (err) {
-      await this.log.error(`Phase advance failed: ${err.message}`)
+      const result = await this.adapter.spawn(prompt, {
+        model: step.skill?.agentModel || 'sonnet',
+        mcpConfig: mcpConfigPath,
+        workingDir,
+      })
+
+      if (result.exitCode !== 0) {
+        const errSnippet = (result.stderr || result.stdout || '').slice(-500)
+        await this.log.warn(`${this.adapter.name} exited with code ${result.exitCode}: ${errSnippet}`)
+        if (!result.stdout?.trim()) {
+          await this.log.error(`${this.adapter.name} produced no output. Skipping phase advance.`)
+          return
+        }
+      }
+
+      const verifications = step.skill?.verificationsJson || []
+      if (verifications.length > 0) {
+        const passed = await this.verifyAndRepair(step, flow, flowId, verifications, mcpConfigPath)
+        if (!passed) return
+      }
+
+      await this.log.step('✅', `Step ${step.pipelineStep} (${step.phase}) complete`)
+      try {
+        const updateResult = await this.client.updateFlow(flowId, { phaseComplete: true })
+        await this.log.step('📋', `Phase advanced: ${JSON.stringify(updateResult?.current_state || updateResult?.currentState || 'ok').slice(0, 100)}`)
+      } catch (err) {
+        await this.log.error(`Phase advance failed: ${err.message}`)
+      }
+    } finally {
+      cleanupMcpConfig(mcpConfigPath)
     }
   }
 
-  async verifyAndRepair(step, flow, flowId, verifications) {
+  async verifyAndRepair(step, flow, flowId, verifications, mcpConfigPath) {
     await this.log.step('🧪', 'Running verifications...')
     let checks = await this.verifier.run(verifications)
 
@@ -146,7 +159,7 @@ export class Runner {
 
       await this.adapter.spawn(repairPrompt, {
         model: step.skill?.agentModel || 'sonnet',
-        mcpConfig: this.getMcpConfigPath(),
+        mcpConfig: mcpConfigPath,
         workingDir: process.cwd(),
       })
 
@@ -183,9 +196,6 @@ export class Runner {
     }
   }
 
-  getMcpConfigPath() {
-    return '.mcp.json'
-  }
 }
 
 export async function run(flowId, options = {}) {
@@ -205,17 +215,76 @@ export async function run(flowId, options = {}) {
     maxRetries: config.maxRetries,
     untilGate: options.untilGate,
     dryRun: options.dryRun,
+    mcpServerCommand: config.mcpServerCommand,
+    apiUrl: config.apiUrl,
   })
 
   if (flowId) {
     const resolvedId = await client.resolveFlowId(flowId)
     await runner.runFlow(resolvedId)
+    await client.completeRunnerRequest(resolvedId).catch(() => {})
   } else if (options.all) {
-    console.log('--all mode not yet implemented (Phase 2)')
+    await runAll(client, runner)
   } else if (options.watch) {
-    console.log('--watch mode not yet implemented (Phase 2)')
+    await watchMode(client, runner, config.pollInterval || 60000)
   } else {
-    console.error('Please provide a flow ID or use --all / --watch')
-    process.exit(1)
+    // Interactive mode: Project → Flow → Tool wizard
+    const { interactiveSelect } = await import('./interactive.js')
+    const selection = await interactiveSelect(client, ['claude'])
+    const resolvedId = await client.resolveFlowId(selection.flowId)
+    await runner.runFlow(resolvedId)
+    await client.completeRunnerRequest(resolvedId).catch(() => {})
+  }
+}
+
+/**
+ * Run all flows in the runner queue (runner_requested=1).
+ */
+async function runAll(client, runner) {
+  const queue = await client.getRunnerQueue()
+  const flows = Array.isArray(queue) ? queue : []
+
+  if (flows.length === 0) {
+    console.log('No flows in runner queue.')
+    return
+  }
+
+  console.log(`Found ${flows.length} flow(s) in runner queue.`)
+
+  for (const flow of flows) {
+    const displayId = flow.displayId || flow.display_id || flow.id
+    console.log(`\nStarting: ${displayId} — ${flow.ticketSummary || flow.ticket_summary}`)
+    try {
+      await runner.runFlow(flow.id)
+      await client.completeRunnerRequest(flow.id).catch(() => {})
+      console.log(`Completed: ${displayId}`)
+    } catch (err) {
+      console.error(`Failed: ${displayId} — ${err.message}`)
+    }
+  }
+
+  console.log(`\nDone. Processed ${flows.length} flow(s).`)
+}
+
+/**
+ * Watch mode — poll for new runner-requested flows every N ms.
+ */
+async function watchMode(client, runner, intervalMs) {
+  console.log(`Watch mode started (polling every ${Math.round(intervalMs / 1000)}s). Press Ctrl+C to stop.`)
+
+  const shutdown = () => {
+    console.log('\nWatch mode stopped.')
+    process.exit(0)
+  }
+  process.on('SIGINT', shutdown)
+  process.on('SIGTERM', shutdown)
+
+  while (true) {
+    try {
+      await runAll(client, runner)
+    } catch (err) {
+      console.error(`Poll error: ${err.message}`)
+    }
+    await new Promise(resolve => setTimeout(resolve, intervalMs))
   }
 }

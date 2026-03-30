@@ -192,6 +192,15 @@ export class DevFlowClient {
   }
 
   /**
+   * List projects accessible by the authenticated user.
+   *
+   * @returns {Promise<Array>}
+   */
+  async listProjects() {
+    return this.request('GET', '/api/projects');
+  }
+
+  /**
    * List flows, optionally filtered by query parameters.
    *
    * @param {object} [params] — key/value pairs appended as query string
@@ -212,5 +221,31 @@ export class DevFlowClient {
       }
     }
     return this.request('GET', path);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Runner queue
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Get flows that have been requested for runner execution.
+   * Returns flows with runner_requested=1 in ready/in_progress state.
+   *
+   * @param {string} [projectId] — optional filter by project
+   * @returns {Promise<Array>}
+   */
+  async getRunnerQueue(projectId) {
+    const qs = projectId ? `?projectId=${projectId}` : '';
+    return this.request('GET', `/api/flows/runner-queue${qs}`);
+  }
+
+  /**
+   * Mark a flow as runner-complete (reset runner_requested to 0).
+   *
+   * @param {string} flowId
+   * @returns {Promise<object>}
+   */
+  async completeRunnerRequest(flowId) {
+    return this.request('POST', `/api/flows/${flowId}/runner-complete`);
   }
 }
