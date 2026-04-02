@@ -258,4 +258,231 @@ describe('Runner', () => {
       expect(client.updateFlow).not.toHaveBeenCalled()
     })
   })
+
+  describe('Session cleanup on error', () => {
+    it('should call completeSession even when executeStep throws', async () => {
+      let callCount = 0
+      const client = createMockClient({
+        getNextStep: vi.fn().mockImplementation(() => {
+          callCount++
+          if (callCount === 1) {
+            return {
+              flowState: 'in_progress', pipelineStep: 'implementation', phase: 'action',
+              actor: 'agent', gate: { blocked: false },
+              skill: { prompt: 'Impl', name: 'test' },
+            }
+          }
+          return { flowState: 'done' }
+        }),
+        updateFlow: vi.fn().mockRejectedValue(new Error('Network error')),
+      })
+      const adapter = createMockAdapter()
+      const runner = new Runner(client, adapter, createMockVerifier())
+
+      await runner.runFlow('f-1')
+
+      expect(client.completeSession).toHaveBeenCalled()
+    })
+
+    it('should handle initSession failure gracefully', async () => {
+      const client = createMockClient({
+        initSession: vi.fn().mockRejectedValue(new Error('401 Unauthorized')),
+      })
+      const runner = new Runner(client, createMockAdapter(), createMockVerifier())
+
+      // Should not throw — should handle the error internally
+      await expect(runner.runFlow('f-1')).resolves.not.toThrow()
+    })
+  })
+
+  describe('Working directory resolution', () => {
+    it('should use projectPaths config for workingDir', async () => {
+      let callCount = 0
+      const client = createMockClient({
+        initSession: vi.fn().mockResolvedValue({
+          flow: { id: 'f-1', displayId: 'DF-99', summary: 'Test', projectId: 'proj-123' },
+          tasks: [],
+        }),
+        getNextStep: vi.fn().mockImplementation(() => {
+          callCount++
+          if (callCount === 1) {
+            return {
+              flowState: 'in_progress', pipelineStep: 'implementation', phase: 'action',
+              actor: 'agent', gate: { blocked: false },
+              skill: { prompt: 'Impl', name: 'test' },
+            }
+          }
+          return { flowState: 'done' }
+        }),
+      })
+      const adapter = createMockAdapter()
+      const runner = new Runner(client, adapter, createMockVerifier(), {
+        projectPaths: { 'proj-123': { name: 'TestProject', path: '/tmp/test-project' } },
+      })
+
+      await runner.runFlow('f-1')
+
+      // Adapter should have been spawned with the project path
+      expect(adapter.spawn).toHaveBeenCalled()
+      const spawnCall = adapter.spawn.mock.calls[0]
+      expect(spawnCall[1].workingDir).toBe('/tmp/test-project')
+    })
+
+    it('should pass workingDir to verifyAndRepair', async () => {
+      let callCount = 0
+      const client = createMockClient({
+        initSession: vi.fn().mockResolvedValue({
+          flow: { id: 'f-1', displayId: 'DF-99', summary: 'Test', projectId: 'proj-456' },
+          tasks: [],
+        }),
+        getNextStep: vi.fn().mockImplementation(() => {
+          callCount++
+          if (callCount === 1) {
+            return {
+              flowState: 'in_progress', pipelineStep: 'implementation', phase: 'action',
+              actor: 'agent', gate: { blocked: false },
+              skill: { prompt: 'Impl', name: 'test', verificationsJson: [{ type: 'command', command: 'echo ok', label: 'test' }] },
+            }
+          }
+          return { flowState: 'done' }
+        }),
+      })
+      const adapter = createMockAdapter()
+      const verifier = createMockVerifier({
+        run: vi.fn().mockResolvedValue({ allPassed: false, results: [{ label: 'test', passed: false }], failures: [{ label: 'test', output: 'fail' }] }),
+      })
+      const runner = new Runner(client, adapter, verifier, {
+        projectPaths: { 'proj-456': { path: '/tmp/verify-project' } },
+        maxRetries: 1,
+      })
+
+      await runner.runFlow('f-1')
+
+      // Repair spawn should use the project working dir
+      const repairCalls = adapter.spawn.mock.calls.filter((_, i) => i > 0)
+      if (repairCalls.length > 0) {
+        expect(repairCalls[0][1].workingDir).toBe('/tmp/verify-project')
+      }
+    })
+  })
+
+  describe('Session isolation in multi-flow', () => {
+    it('should reset sessionId after completeSession', async () => {
+      const client = createMockClient()
+      const runner = new Runner(client, createMockAdapter(), createMockVerifier())
+
+      await runner.runFlow('f-1')
+
+      // After runFlow completes, sessionId should be cleared
+      expect(client.sessionId).toBeNull()
+    })
+  })
+
+  describe('Review step advancement', () => {
+    it('should submitReview for review-kind steps instead of phaseComplete', async () => {
+      let callCount = 0
+      const client = createMockClient({
+        getNextStep: vi.fn().mockImplementation(() => {
+          callCount++
+          if (callCount === 1) {
+            return {
+              flowState: 'review', pipelineStep: 'code_review', phase: 'action',
+              actor: 'both', kind: 'review', gate: { blocked: false },
+              transitionPolicy: 'human_or_agent',
+              skill: { prompt: 'Review the code', name: 'code-reviewer' },
+            }
+          }
+          return { flowState: 'done' }
+        }),
+      })
+      const adapter = createMockAdapter()
+      const runner = new Runner(client, adapter, createMockVerifier())
+
+      await runner.runFlow('f-1')
+
+      expect(client.submitReview).toHaveBeenCalledWith('f-1', 'code_review', 'approved', expect.any(String))
+      // phaseComplete should NOT have been sent for this step
+      const phaseAdvanceCalls = client.updateFlow.mock.calls.filter(c => c[1]?.phaseComplete === true)
+      expect(phaseAdvanceCalls).toHaveLength(0)
+    })
+
+    it('should use step.kind from backend, not hardcoded REVIEW_STEPS list', async () => {
+      let callCount = 0
+      const client = createMockClient({
+        getNextStep: vi.fn().mockImplementation(() => {
+          callCount++
+          if (callCount === 1) {
+            return {
+              flowState: 'review', pipelineStep: 'custom_review', phase: 'action',
+              actor: 'agent', kind: 'review', gate: { blocked: false },
+              skill: { prompt: 'Custom review', name: 'custom' },
+            }
+          }
+          return { flowState: 'done' }
+        }),
+      })
+      const adapter = createMockAdapter()
+      const runner = new Runner(client, adapter, createMockVerifier())
+
+      await runner.runFlow('f-1')
+
+      // Even though 'custom_review' is not in REVIEW_STEPS, kind='review' triggers submitReview
+      expect(client.submitReview).toHaveBeenCalledWith('f-1', 'custom_review', 'approved', expect.any(String))
+    })
+
+    it('should use phaseComplete for work-kind steps', async () => {
+      let callCount = 0
+      const client = createMockClient({
+        getNextStep: vi.fn().mockImplementation(() => {
+          callCount++
+          if (callCount === 1) {
+            return {
+              flowState: 'in_progress', pipelineStep: 'implementation', phase: 'action',
+              actor: 'agent', kind: 'work', gate: { blocked: false },
+              skill: { prompt: 'Implement', name: 'test' },
+            }
+          }
+          return { flowState: 'done' }
+        }),
+      })
+      const adapter = createMockAdapter()
+      const runner = new Runner(client, adapter, createMockVerifier())
+
+      await runner.runFlow('f-1')
+
+      expect(client.submitReview).not.toHaveBeenCalled()
+      expect(client.updateFlow).toHaveBeenCalledWith('f-1', { phaseComplete: true })
+    })
+  })
+
+  describe('Exit code handling', () => {
+    it('should NOT advance phase when adapter exits with non-zero code', async () => {
+      let callCount = 0
+      const client = createMockClient({
+        getNextStep: vi.fn().mockImplementation(() => {
+          callCount++
+          if (callCount === 1) {
+            return {
+              flowState: 'in_progress', pipelineStep: 'implementation', phase: 'action',
+              actor: 'agent', gate: { blocked: false },
+              skill: { prompt: 'Impl', name: 'test' },
+            }
+          }
+          return { flowState: 'done' }
+        }),
+      })
+      const adapter = createMockAdapter({
+        spawn: vi.fn().mockResolvedValue({ exitCode: 1, stdout: 'partial output', stderr: 'error occurred' }),
+      })
+      const runner = new Runner(client, adapter, createMockVerifier())
+
+      await runner.runFlow('f-1')
+
+      // updateFlow should NOT have been called with phaseComplete
+      const phaseAdvanceCalls = client.updateFlow.mock.calls.filter(
+        c => c[1]?.phaseComplete === true
+      )
+      expect(phaseAdvanceCalls).toHaveLength(0)
+    })
+  })
 })

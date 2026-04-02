@@ -19,71 +19,88 @@ export class Runner {
   }
 
   async runFlow(flowId) {
-    const init = await this.client.initSession(flowId)
-    const flow = init.flow || init
-    flow.tasks = init.tasks || []
-
-    await this.log.step('🚀', `Starting runner for ${flow.displayId}: "${flow.summary}"`)
-
-    let lastStepKey = null
-    let sameStepCount = 0
-    const MAX_SAME_STEP = 5
-
-    while (true) {
-      const step = await this.client.getNextStep(flowId)
-
-      // Loop protection: detect if we're stuck on the same step
-      const stepKey = `${step.flowState}:${step.pipelineStep}:${step.phase}`
-      if (stepKey === lastStepKey) {
-        sameStepCount++
-        if (sameStepCount >= MAX_SAME_STEP) {
-          await this.log.error(`Stuck on step ${stepKey} for ${MAX_SAME_STEP} iterations. Stopping.`)
-          break
-        }
-      } else {
-        sameStepCount = 0
-        lastStepKey = stepKey
-      }
-
-      if (step.flowState === 'done') {
-        await this.log.step('🎉', `Flow ${flow.displayId} completed!`)
-        break
-      }
-
-      if (step.gate?.blocked) {
-        const handled = await this.handleGate(step, flowId)
-        if (!handled) break
-        continue
-      }
-
-      if (step.actor === 'human' || step.actor === 'skip') {
-        await this.log.step('⏭', `Skipping step ${step.pipelineStep} (actor: ${step.actor})`)
-        await this.client.updateFlow(flowId, { phaseComplete: true })
-        continue
-      }
-
-      if (step.actor === 'auto' && step.kind === 'terminal') {
-        const stateMap = { approval: 'ready', ready: 'in_progress', review: 'done' }
-        const nextState = stateMap[step.flowState]
-        if (nextState) {
-          await this.log.step('⏭', `Auto-transition: ${step.flowState} → ${nextState}`)
-          await this.client.updateFlow(flowId, { currentState: nextState })
-        } else {
-          await this.log.step('⏭', `Skipping terminal step ${step.pipelineStep}`)
-          await this.client.updateFlow(flowId, { phaseComplete: true })
-        }
-        continue
-      }
-
-      await this.log.step('⚙️', `Step: ${step.pipelineStep} (phase: ${step.phase}, tool: ${this.adapter.name})`)
-      await this.executeStep(step, flow, flowId)
-
-      try { await this.client.touchActivity() } catch {}
+    let flow = null
+    try {
+      const init = await this.client.initSession(flowId)
+      flow = init.flow || init
+      flow.tasks = init.tasks || []
+    } catch (err) {
+      await this.log.error(`Failed to init session for ${flowId}: ${err.message}`)
+      return
     }
 
     try {
-      await this.client.completeSession(`Runner finished for ${flow.displayId}`)
-    } catch {}
+      await this.log.step('🚀', `Starting runner for ${flow.displayId}: "${flow.summary}"`)
+
+      let lastStepKey = null
+      let sameStepCount = 0
+      let totalIterations = 0
+      const MAX_SAME_STEP = 5
+      const MAX_TOTAL_ITERATIONS = 20
+
+      while (true) {
+        totalIterations++
+        if (totalIterations > MAX_TOTAL_ITERATIONS) {
+          await this.log.error(`Total iteration limit (${MAX_TOTAL_ITERATIONS}) reached. Stopping.`)
+          break
+        }
+
+        const step = await this.client.getNextStep(flowId)
+
+        // Loop protection: detect if we're stuck on the same step
+        const stepKey = `${step.flowState}:${step.pipelineStep}:${step.phase}`
+        if (stepKey === lastStepKey) {
+          sameStepCount++
+          if (sameStepCount >= MAX_SAME_STEP) {
+            await this.log.error(`Stuck on step ${stepKey} for ${MAX_SAME_STEP} iterations. Stopping.`)
+            break
+          }
+        } else {
+          sameStepCount = 0
+          lastStepKey = stepKey
+        }
+
+        if (step.flowState === 'done') {
+          await this.log.step('🎉', `Flow ${flow.displayId} completed!`)
+          break
+        }
+
+        if (step.gate?.blocked) {
+          const handled = await this.handleGate(step, flowId)
+          if (!handled) break
+          continue
+        }
+
+        if (step.actor === 'human' || step.actor === 'skip') {
+          await this.log.step('⏭', `Skipping step ${step.pipelineStep} (actor: ${step.actor})`)
+          await this.client.updateFlow(flowId, { phaseComplete: true })
+          continue
+        }
+
+        if (step.actor === 'auto' && step.kind === 'terminal') {
+          const stateMap = { approval: 'ready', ready: 'in_progress', review: 'done' }
+          const nextState = stateMap[step.flowState]
+          if (nextState) {
+            await this.log.step('⏭', `Auto-transition: ${step.flowState} → ${nextState}`)
+            await this.client.updateFlow(flowId, { currentState: nextState })
+          } else {
+            await this.log.step('⏭', `Skipping terminal step ${step.pipelineStep}`)
+            await this.client.updateFlow(flowId, { phaseComplete: true })
+          }
+          continue
+        }
+
+        await this.log.step('⚙️', `Step: ${step.pipelineStep} (phase: ${step.phase}, tool: ${this.adapter.name})`)
+        await this.executeStep(step, flow, flowId)
+
+        try { await this.client.touchActivity() } catch {}
+      }
+    } finally {
+      try {
+        await this.client.completeSession(`Runner finished for ${flow.displayId}`)
+      } catch {}
+      this.client.sessionId = null
+    }
   }
 
   async handleGate(step, flowId) {
@@ -141,25 +158,23 @@ export class Runner {
 
       if (result.exitCode !== 0) {
         const errSnippet = (result.stderr || result.stdout || '').slice(-500)
-        await this.log.warn(`${this.adapter.name} exited with code ${result.exitCode}: ${errSnippet}`)
-        if (!result.stdout?.trim()) {
-          await this.log.error(`${this.adapter.name} produced no output. Skipping phase advance.`)
-          return
-        }
+        await this.log.error(`${this.adapter.name} exited with code ${result.exitCode}: ${errSnippet}`)
+        return // Non-zero exit = failure, do not advance phase
       }
 
       const verifications = step.skill?.verificationsJson || []
       if (verifications.length > 0) {
-        const passed = await this.verifyAndRepair(step, flow, flowId, verifications, mcpConfigPath)
+        const passed = await this.verifyAndRepair(step, flow, flowId, verifications, mcpConfigPath, workingDir)
         if (!passed) return
       }
 
       await this.log.step('✅', `Step ${step.pipelineStep} (${step.phase}) complete`)
 
-      // Advance: for review sub-steps, submit a review to mark them complete.
-      // For regular steps, phaseComplete handles phase/state advancement.
+      // Advance: for review-kind steps, submit a review to mark them complete.
+      // For work-kind steps, phaseComplete handles phase/state advancement.
       try {
-        if (REVIEW_STEPS.includes(step.pipelineStep) && this.isLastPhase(step)) {
+        const isReviewStep = step.kind === 'review' || REVIEW_STEPS.includes(step.pipelineStep)
+        if (isReviewStep && this.isLastPhase(step)) {
           const summary = (result.stdout || '').slice(-500) || 'Runner auto-review'
           await this.client.submitReview(flowId, step.pipelineStep, 'approved', summary)
           await this.log.step('📋', `Review submitted for ${step.pipelineStep}`)
@@ -183,7 +198,7 @@ export class Runner {
     return false
   }
 
-  async verifyAndRepair(step, flow, flowId, verifications, mcpConfigPath) {
+  async verifyAndRepair(step, flow, flowId, verifications, mcpConfigPath, workingDir) {
     await this.log.step('🧪', 'Running verifications...')
     let checks = await this.verifier.run(verifications)
 
@@ -205,7 +220,7 @@ export class Runner {
       await this.adapter.spawn(repairPrompt, {
         model: step.skill?.agentModel || 'sonnet',
         mcpConfig: mcpConfigPath,
-        workingDir: process.cwd(),
+        workingDir: workingDir || process.cwd(),
       })
 
       checks = await this.verifier.run(verifications)
@@ -319,21 +334,25 @@ async function watchMode(client, runner, intervalMs) {
   console.log(`Watch mode started. Press Ctrl+C to stop.`)
 
   let socketConnected = false
-  let busy = false
+  const activeFlows = new Set()
 
   const executeFlow = async (flowId) => {
-    if (busy) {
-      console.log(`⏳ Already executing a flow, skipping ${flowId}`)
+    if (activeFlows.has(flowId)) {
+      console.log(`⏳ Flow ${flowId} already running, skipping`)
       return
     }
-    busy = true
+    if (activeFlows.size > 0) {
+      console.log(`⏳ Already executing a flow, queuing ${flowId}`)
+      return
+    }
+    activeFlows.add(flowId)
     try {
       await runner.runFlow(flowId)
       await client.completeRunnerRequest(flowId).catch(() => {})
     } catch (err) {
       console.error(`Failed: ${flowId} — ${err.message}`)
     }
-    busy = false
+    activeFlows.delete(flowId)
   }
 
   // Try Socket.IO connection for push-based job delivery
@@ -385,7 +404,7 @@ async function watchMode(client, runner, intervalMs) {
   process.on('SIGTERM', shutdown)
 
   while (true) {
-    if (!busy) {
+    if (activeFlows.size === 0) {
       try {
         await runAll(client, runner)
       } catch (err) {

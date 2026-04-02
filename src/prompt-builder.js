@@ -31,9 +31,9 @@ export function buildPrompt(step, flow, options = {}) {
     parts.push(`## Previous Feedback\n${options.previousFeedback}`)
   }
 
-  // Always: devflow_init reminder
+  // Always: devflow_init reminder + task tracking
   parts.push(
-    `## Important\nStart by calling devflow_init({ flowId: "${flow.id}" }) to initialize your session.\nAll your work will be tracked in DevFlow.`
+    `## Important\nStart by calling devflow_init({ flowId: "${flow.id}" }) to initialize your session.\nFor each task you complete, call task_update to mark it as done.\nAll your work will be tracked in DevFlow.`
   )
 
   return parts.join('\n\n')
