@@ -234,4 +234,62 @@ describe('DevFlowClient', () => {
       });
     });
   });
+
+  // ---- Retry on transient errors -------------------------------------------
+
+  describe('Retry logic', () => {
+    it('should retry on 500 errors up to 3 times', async () => {
+      let callCount = 0
+      global.fetch = vi.fn().mockImplementation(async () => {
+        callCount++
+        if (callCount <= 3) {
+          return fakeResponse({ success: false, error: 'Internal Server Error' }, 500)
+        }
+        return fakeResponse({ success: true, data: { flowState: 'done' } })
+      })
+
+      const client = new DevFlowClient('https://api.test', 'tok')
+      const result = await client.getNextStep('f1')
+
+      expect(result.flowState).toBe('done')
+      expect(callCount).toBe(4) // 3 retries + 1 success
+    })
+
+    it('should retry on network errors (fetch throws)', async () => {
+      let callCount = 0
+      global.fetch = vi.fn().mockImplementation(async () => {
+        callCount++
+        if (callCount <= 2) {
+          throw new Error('ECONNREFUSED')
+        }
+        return fakeResponse({ success: true, data: {} })
+      })
+
+      const client = new DevFlowClient('https://api.test', 'tok')
+      const result = await client.getNextStep('f1')
+
+      expect(callCount).toBe(3)
+    })
+
+    it('should NOT retry on 401/403 errors', async () => {
+      let callCount = 0
+      global.fetch = vi.fn().mockImplementation(async () => {
+        callCount++
+        return fakeResponse({ success: false, error: 'Unauthorized' }, 401)
+      })
+
+      const client = new DevFlowClient('https://api.test', 'tok')
+      await expect(client.getNextStep('f1')).rejects.toThrow('Unauthorized')
+      expect(callCount).toBe(1) // No retry
+    })
+
+    it('should throw after max retries exhausted', async () => {
+      global.fetch = vi.fn().mockResolvedValue(
+        fakeResponse({ success: false, error: 'Server Error' }, 500)
+      )
+
+      const client = new DevFlowClient('https://api.test', 'tok')
+      await expect(client.getNextStep('f1')).rejects.toThrow('Server Error')
+    })
+  });
 });

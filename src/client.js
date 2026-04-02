@@ -31,7 +31,7 @@ export class DevFlowClient {
    * @returns {Promise<object>} — parsed response body
    * @throws {Error} with `status`, `response`, and optional `gate` properties
    */
-  async request(method, path, body) {
+  async request(method, path, body, { retries = 3, retryDelay = 500 } = {}) {
     const url = `${this.baseUrl}${path}`;
 
     const headers = {
@@ -48,20 +48,46 @@ export class DevFlowClient {
       options.body = JSON.stringify(body);
     }
 
-    const res = await fetch(url, options);
-    const json = await res.json();
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      let res, json;
+      try {
+        res = await fetch(url, options);
+        json = await res.json();
+      } catch (networkErr) {
+        // Network error (ECONNREFUSED, timeout, etc.) — retry
+        if (attempt < retries) {
+          await new Promise(r => setTimeout(r, retryDelay * (attempt + 1)));
+          continue;
+        }
+        throw networkErr;
+      }
 
-    if (!res.ok || json.success === false) {
+      if (res.ok && json.success !== false) {
+        return json.data !== undefined ? json.data : json;
+      }
+
+      // Don't retry auth errors
+      if (res.status === 401 || res.status === 403) {
+        const err = new Error(json.error || `API ${method} ${path} failed (${res.status})`);
+        err.status = res.status;
+        err.response = json;
+        if (json.gate) err.gate = json.gate;
+        throw err;
+      }
+
+      // Retry on 5xx
+      if (res.status >= 500 && attempt < retries) {
+        await new Promise(r => setTimeout(r, retryDelay * (attempt + 1)));
+        continue;
+      }
+
+      // Non-retryable error or retries exhausted
       const err = new Error(json.error || `API ${method} ${path} failed (${res.status})`);
       err.status = res.status;
       err.response = json;
-      if (json.gate) {
-        err.gate = json.gate;
-      }
+      if (json.gate) err.gate = json.gate;
       throw err;
     }
-
-    return json.data !== undefined ? json.data : json;
   }
 
   // ---------------------------------------------------------------------------

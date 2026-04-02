@@ -158,11 +158,8 @@ export class Runner {
 
       if (result.exitCode !== 0) {
         const errSnippet = (result.stderr || result.stdout || '').slice(-500)
-        await this.log.warn(`${this.adapter.name} exited with code ${result.exitCode}: ${errSnippet}`)
-        if (!result.stdout?.trim()) {
-          await this.log.error(`${this.adapter.name} produced no output. Skipping phase advance.`)
-          return
-        }
+        await this.log.error(`${this.adapter.name} exited with code ${result.exitCode}: ${errSnippet}`)
+        return // Non-zero exit = failure, do not advance phase
       }
 
       const verifications = step.skill?.verificationsJson || []

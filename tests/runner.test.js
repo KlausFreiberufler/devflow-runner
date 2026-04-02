@@ -377,4 +377,35 @@ describe('Runner', () => {
       expect(client.sessionId).toBeNull()
     })
   })
+
+  describe('Exit code handling', () => {
+    it('should NOT advance phase when adapter exits with non-zero code', async () => {
+      let callCount = 0
+      const client = createMockClient({
+        getNextStep: vi.fn().mockImplementation(() => {
+          callCount++
+          if (callCount === 1) {
+            return {
+              flowState: 'in_progress', pipelineStep: 'implementation', phase: 'action',
+              actor: 'agent', gate: { blocked: false },
+              skill: { prompt: 'Impl', name: 'test' },
+            }
+          }
+          return { flowState: 'done' }
+        }),
+      })
+      const adapter = createMockAdapter({
+        spawn: vi.fn().mockResolvedValue({ exitCode: 1, stdout: 'partial output', stderr: 'error occurred' }),
+      })
+      const runner = new Runner(client, adapter, createMockVerifier())
+
+      await runner.runFlow('f-1')
+
+      // updateFlow should NOT have been called with phaseComplete
+      const phaseAdvanceCalls = client.updateFlow.mock.calls.filter(
+        c => c[1]?.phaseComplete === true
+      )
+      expect(phaseAdvanceCalls).toHaveLength(0)
+    })
+  })
 })
