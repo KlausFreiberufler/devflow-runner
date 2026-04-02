@@ -20,7 +20,12 @@ export function loadConfig(overrides = {}) {
     fileConfig = JSON.parse(readFileSync(CONFIG_PATH, 'utf-8'))
   }
 
-  return { ...defaults, ...fileConfig, ...overrides }
+  // Filter out undefined values so they don't override defaults/fileConfig
+  const cleanOverrides = Object.fromEntries(
+    Object.entries(overrides).filter(([, v]) => v !== undefined)
+  )
+
+  return { ...defaults, ...fileConfig, ...cleanOverrides }
 }
 
 export function loadToken() {

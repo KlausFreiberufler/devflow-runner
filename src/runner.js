@@ -53,9 +53,22 @@ export class Runner {
         continue
       }
 
-      if (step.actor === 'human' || step.actor === 'skip' || step.actor === 'auto') {
+      if (step.actor === 'human' || step.actor === 'skip') {
         await this.log.step('⏭', `Skipping step ${step.pipelineStep} (actor: ${step.actor})`)
         await this.client.updateFlow(flowId, { phaseComplete: true })
+        continue
+      }
+
+      if (step.actor === 'auto' && step.kind === 'terminal') {
+        const stateMap = { approval: 'ready', ready: 'in_progress', review: 'done' }
+        const nextState = stateMap[step.flowState]
+        if (nextState) {
+          await this.log.step('⏭', `Auto-transition: ${step.flowState} → ${nextState}`)
+          await this.client.updateFlow(flowId, { currentState: nextState })
+        } else {
+          await this.log.step('⏭', `Skipping terminal step ${step.pipelineStep}`)
+          await this.client.updateFlow(flowId, { phaseComplete: true })
+        }
         continue
       }
 
@@ -204,7 +217,7 @@ export async function run(flowId, options = {}) {
   const { ClaudeAdapter } = await import('./adapters/claude.js')
   const { Verifier } = await import('./verifier.js')
 
-  const config = loadConfig({ apiUrl: options.url })
+  const config = loadConfig(options.url ? { apiUrl: options.url } : {})
   const token = loadToken()
 
   const client = new DevFlowClient(config.apiUrl, token)

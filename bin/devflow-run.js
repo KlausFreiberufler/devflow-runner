@@ -4,9 +4,9 @@ import { run } from '../src/runner.js'
 import { setup } from '../src/setup.js'
 
 program
-  .name('devflow-run')
+  .name('devflow-runner')
   .description('Autonomous flow orchestration for DevFlow')
-  .version('0.2.0')
+  .version('0.2.1')
 
 program
   .command('setup')
@@ -23,10 +23,22 @@ program
   })
 
 program
-  .command('run', { isDefault: true })
-  .argument('[flow-id]', 'Flow ID or display ID to run')
+  .command('watch')
+  .description('Watch for new jobs and execute them automatically')
+  .option('--url <url>', 'DevFlow API URL (default: from config)')
+  .action(async (options) => {
+    try {
+      await run(null, { ...options, watch: true })
+    } catch (err) {
+      console.error('❌', err.message)
+      process.exit(1)
+    }
+  })
+
+program
+  .command('run [flow-id]', { isDefault: true })
+  .description('Run a specific flow or pick interactively')
   .option('--all', 'Run all flows with runner_requested flag')
-  .option('--watch', 'Watch mode: poll every 60s for new work')
   .option('--tool <tool>', 'Override tool adapter (default: claude)')
   .option('--until-gate', 'Run until next human gate, then exit')
   .option('--url <url>', 'DevFlow API URL (default: from config)')

@@ -32,13 +32,13 @@ export async function setup({ token, url }) {
     const data = await res.json()
     if (res.ok && data.success) {
       console.log('✅ Connected to DevFlow successfully!')
-      console.log(`\nStart the runner with: devflow-run watch`)
+      console.log(`\nStart the runner with: devflow-runner watch`)
     } else {
       console.warn(`⚠️  Connection check returned: ${data.error || 'unknown error'}`)
-      console.log('The token was saved. You can try starting the runner with: devflow-run watch')
+      console.log('The token was saved. You can try starting the runner with: devflow-runner watch')
     }
   } catch (err) {
     console.warn(`⚠️  Could not reach ${url}: ${err.message}`)
-    console.log('The token was saved. Check the URL and try: devflow-run watch')
+    console.log('The token was saved. Check the URL and try: devflow-runner watch')
   }
 }
