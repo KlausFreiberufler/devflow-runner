@@ -1,6 +1,6 @@
 {
   "name": "@devflow/runner",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Autonomous flow orchestration for DevFlow — spawns AI tools, verifies objectively, self-repairs on failure",
   "type": "module",
   "bin": {

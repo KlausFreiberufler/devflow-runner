@@ -2,6 +2,8 @@ import { buildPrompt, buildRepairPrompt } from './prompt-builder.js'
 import { Logger } from './utils/logger.js'
 import { generateMcpConfig, cleanupMcpConfig } from './utils/mcp-config.js'
 
+const REVIEW_STEPS = ['approval', 'code_review', 'testing']
+
 export class Runner {
   constructor(client, adapter, verifier, options = {}) {
     this.client = client
@@ -12,6 +14,7 @@ export class Runner {
     this.dryRun = options.dryRun || false
     this.mcpServerCommand = options.mcpServerCommand || 'npx devflow-mcp'
     this.apiUrl = options.apiUrl || 'https://api.app.dev-flow.tech'
+    this.projectPaths = options.projectPaths || {}
     this.log = new Logger(client)
   }
 
@@ -99,6 +102,14 @@ export class Runner {
     return true
   }
 
+  resolveWorkingDir(flow) {
+    const projectId = flow.projectId || flow.project_id
+    const entry = this.projectPaths[projectId]
+    if (entry?.path) return entry.path
+    if (entry && typeof entry === 'string') return entry
+    return process.cwd()
+  }
+
   async executeStep(step, flow, flowId) {
     const prompt = buildPrompt(step, flow, {
       previousFeedback: step.previousFeedback,
@@ -106,17 +117,21 @@ export class Runner {
 
     if (this.dryRun) {
       await this.log.step('🔍', `[DRY RUN] Would spawn ${this.adapter.name} with ${prompt.length} char prompt`)
-      return  // Don't call API in dry-run — just log and return
+      return
     }
 
-    const workingDir = process.cwd()
+    const workingDir = this.resolveWorkingDir(flow)
+    if (workingDir === process.cwd()) {
+      await this.log.warn(`No project path configured for project ${flow.projectId || flow.project_id}. Using cwd. Run: devflow-runner projects`)
+    }
+
     const mcpConfigPath = generateMcpConfig({
       workingDir,
       apiUrl: this.apiUrl,
       mcpServerCommand: this.mcpServerCommand,
     })
 
-    await this.log.step('🤖', `Spawning ${this.adapter.name}...`)
+    await this.log.step('🤖', `Spawning ${this.adapter.name} in ${workingDir}...`)
     try {
       const result = await this.adapter.spawn(prompt, {
         model: step.skill?.agentModel || 'sonnet',
@@ -140,15 +155,32 @@ export class Runner {
       }
 
       await this.log.step('✅', `Step ${step.pipelineStep} (${step.phase}) complete`)
+
+      // Advance: for review sub-steps, submit a review to mark them complete.
+      // For regular steps, phaseComplete handles phase/state advancement.
       try {
-        const updateResult = await this.client.updateFlow(flowId, { phaseComplete: true })
-        await this.log.step('📋', `Phase advanced: ${JSON.stringify(updateResult?.current_state || updateResult?.currentState || 'ok').slice(0, 100)}`)
+        if (REVIEW_STEPS.includes(step.pipelineStep) && this.isLastPhase(step)) {
+          const summary = (result.stdout || '').slice(-500) || 'Runner auto-review'
+          await this.client.submitReview(flowId, step.pipelineStep, 'approved', summary)
+          await this.log.step('📋', `Review submitted for ${step.pipelineStep}`)
+        } else {
+          const updateResult = await this.client.updateFlow(flowId, { phaseComplete: true })
+          await this.log.step('📋', `Phase advanced: ${JSON.stringify(updateResult?.current_state || updateResult?.currentState || 'ok').slice(0, 100)}`)
+        }
       } catch (err) {
-        await this.log.error(`Phase advance failed: ${err.message}`)
+        await this.log.error(`Step advance failed: ${err.message}`)
       }
     } finally {
       cleanupMcpConfig(mcpConfigPath)
     }
+  }
+
+  isLastPhase(step) {
+    // If the step has skill phases (pre/action/after), check if current is the last
+    // Without detailed phase info, assume action is the last unless after exists
+    if (step.phase === 'after') return true
+    if (step.phase === 'action' && !step.skill?.afterSkillId) return true
+    return false
   }
 
   async verifyAndRepair(step, flow, flowId, verifications, mcpConfigPath) {
@@ -212,7 +244,7 @@ export class Runner {
 }
 
 export async function run(flowId, options = {}) {
-  const { loadConfig, loadToken } = await import('./utils/config.js')
+  const { loadConfig, loadToken, loadProjectPaths } = await import('./utils/config.js')
   const { DevFlowClient } = await import('./client.js')
   const { ClaudeAdapter } = await import('./adapters/claude.js')
   const { Verifier } = await import('./verifier.js')
@@ -230,6 +262,7 @@ export async function run(flowId, options = {}) {
     dryRun: options.dryRun,
     mcpServerCommand: config.mcpServerCommand,
     apiUrl: config.apiUrl,
+    projectPaths: loadProjectPaths(),
   })
 
   if (flowId) {

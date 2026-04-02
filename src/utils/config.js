@@ -1,4 +1,4 @@
-import { readFileSync, existsSync } from 'fs'
+import { readFileSync, writeFileSync, existsSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 
@@ -37,4 +37,20 @@ export function loadToken() {
   }
 
   throw new Error('No DevFlow token found. Set DEVFLOW_TOKEN or run devflow-mcp setup first.')
+}
+
+export function loadProjectPaths() {
+  if (!existsSync(CONFIG_PATH)) return {}
+  const config = JSON.parse(readFileSync(CONFIG_PATH, 'utf-8'))
+  return config.projectPaths || {}
+}
+
+export function saveProjectPath(projectId, projectName, localPath) {
+  let config = {}
+  if (existsSync(CONFIG_PATH)) {
+    config = JSON.parse(readFileSync(CONFIG_PATH, 'utf-8'))
+  }
+  if (!config.projectPaths) config.projectPaths = {}
+  config.projectPaths[projectId] = { name: projectName, path: localPath }
+  writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
 }
