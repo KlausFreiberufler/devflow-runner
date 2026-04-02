@@ -6,7 +6,7 @@ import { setup } from '../src/setup.js'
 program
   .name('devflow-runner')
   .description('Autonomous flow orchestration for DevFlow')
-  .version('0.2.2')
+  .version('0.3.0')
 
 program
   .command('setup')
