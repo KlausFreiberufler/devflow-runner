@@ -170,10 +170,11 @@ export class Runner {
 
       await this.log.step('✅', `Step ${step.pipelineStep} (${step.phase}) complete`)
 
-      // Advance: for review sub-steps, submit a review to mark them complete.
-      // For regular steps, phaseComplete handles phase/state advancement.
+      // Advance: for review-kind steps, submit a review to mark them complete.
+      // For work-kind steps, phaseComplete handles phase/state advancement.
       try {
-        if (REVIEW_STEPS.includes(step.pipelineStep) && this.isLastPhase(step)) {
+        const isReviewStep = step.kind === 'review' || REVIEW_STEPS.includes(step.pipelineStep)
+        if (isReviewStep && this.isLastPhase(step)) {
           const summary = (result.stdout || '').slice(-500) || 'Runner auto-review'
           await this.client.submitReview(flowId, step.pipelineStep, 'approved', summary)
           await this.log.step('📋', `Review submitted for ${step.pipelineStep}`)

@@ -378,6 +378,83 @@ describe('Runner', () => {
     })
   })
 
+  describe('Review step advancement', () => {
+    it('should submitReview for review-kind steps instead of phaseComplete', async () => {
+      let callCount = 0
+      const client = createMockClient({
+        getNextStep: vi.fn().mockImplementation(() => {
+          callCount++
+          if (callCount === 1) {
+            return {
+              flowState: 'review', pipelineStep: 'code_review', phase: 'action',
+              actor: 'both', kind: 'review', gate: { blocked: false },
+              transitionPolicy: 'human_or_agent',
+              skill: { prompt: 'Review the code', name: 'code-reviewer' },
+            }
+          }
+          return { flowState: 'done' }
+        }),
+      })
+      const adapter = createMockAdapter()
+      const runner = new Runner(client, adapter, createMockVerifier())
+
+      await runner.runFlow('f-1')
+
+      expect(client.submitReview).toHaveBeenCalledWith('f-1', 'code_review', 'approved', expect.any(String))
+      // phaseComplete should NOT have been sent for this step
+      const phaseAdvanceCalls = client.updateFlow.mock.calls.filter(c => c[1]?.phaseComplete === true)
+      expect(phaseAdvanceCalls).toHaveLength(0)
+    })
+
+    it('should use step.kind from backend, not hardcoded REVIEW_STEPS list', async () => {
+      let callCount = 0
+      const client = createMockClient({
+        getNextStep: vi.fn().mockImplementation(() => {
+          callCount++
+          if (callCount === 1) {
+            return {
+              flowState: 'review', pipelineStep: 'custom_review', phase: 'action',
+              actor: 'agent', kind: 'review', gate: { blocked: false },
+              skill: { prompt: 'Custom review', name: 'custom' },
+            }
+          }
+          return { flowState: 'done' }
+        }),
+      })
+      const adapter = createMockAdapter()
+      const runner = new Runner(client, adapter, createMockVerifier())
+
+      await runner.runFlow('f-1')
+
+      // Even though 'custom_review' is not in REVIEW_STEPS, kind='review' triggers submitReview
+      expect(client.submitReview).toHaveBeenCalledWith('f-1', 'custom_review', 'approved', expect.any(String))
+    })
+
+    it('should use phaseComplete for work-kind steps', async () => {
+      let callCount = 0
+      const client = createMockClient({
+        getNextStep: vi.fn().mockImplementation(() => {
+          callCount++
+          if (callCount === 1) {
+            return {
+              flowState: 'in_progress', pipelineStep: 'implementation', phase: 'action',
+              actor: 'agent', kind: 'work', gate: { blocked: false },
+              skill: { prompt: 'Implement', name: 'test' },
+            }
+          }
+          return { flowState: 'done' }
+        }),
+      })
+      const adapter = createMockAdapter()
+      const runner = new Runner(client, adapter, createMockVerifier())
+
+      await runner.runFlow('f-1')
+
+      expect(client.submitReview).not.toHaveBeenCalled()
+      expect(client.updateFlow).toHaveBeenCalledWith('f-1', { phaseComplete: true })
+    })
+  })
+
   describe('Exit code handling', () => {
     it('should NOT advance phase when adapter exits with non-zero code', async () => {
       let callCount = 0
