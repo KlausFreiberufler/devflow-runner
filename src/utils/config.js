@@ -12,6 +12,7 @@ export function loadConfig(overrides = {}) {
     defaultAdapter: 'claude',
     maxRetries: 3,
     spawnTimeout: 30 * 60 * 1000,
+    mcpServerCommand: 'npx devflow-mcp',
   }
 
   let fileConfig = {}

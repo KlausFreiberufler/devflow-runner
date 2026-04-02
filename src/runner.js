@@ -267,10 +267,69 @@ async function runAll(client, runner) {
 }
 
 /**
- * Watch mode — poll for new runner-requested flows every N ms.
+ * Watch mode — Socket.IO push + polling fallback.
  */
 async function watchMode(client, runner, intervalMs) {
-  console.log(`Watch mode started (polling every ${Math.round(intervalMs / 1000)}s). Press Ctrl+C to stop.`)
+  console.log(`Watch mode started. Press Ctrl+C to stop.`)
+
+  let socketConnected = false
+  let busy = false
+
+  const executeFlow = async (flowId) => {
+    if (busy) {
+      console.log(`⏳ Already executing a flow, skipping ${flowId}`)
+      return
+    }
+    busy = true
+    try {
+      await runner.runFlow(flowId)
+      await client.completeRunnerRequest(flowId).catch(() => {})
+    } catch (err) {
+      console.error(`Failed: ${flowId} — ${err.message}`)
+    }
+    busy = false
+  }
+
+  // Try Socket.IO connection for push-based job delivery
+  try {
+    const { io } = await import('socket.io-client')
+    const config = client.baseUrl
+    const token = client.token
+
+    const socket = io(config, {
+      auth: { token },
+      reconnection: true,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 30000,
+      transports: ['websocket', 'polling'],
+    })
+
+    socket.on('connect', () => {
+      socketConnected = true
+      console.log('🔌 Connected to DevFlow (Socket.IO)')
+    })
+
+    socket.on('disconnect', (reason) => {
+      socketConnected = false
+      console.log(`🔌 Disconnected: ${reason}. Reconnecting...`)
+    })
+
+    socket.on('runner:execute', async ({ flowId, displayId, summary }) => {
+      console.log(`\n📥 Job received: ${displayId || flowId} — ${summary || ''}`)
+      await executeFlow(flowId)
+    })
+
+    socket.on('connect_error', (err) => {
+      if (!socketConnected) {
+        console.log(`⚠️  Socket.IO unavailable (${err.message}), using polling fallback`)
+      }
+    })
+  } catch {
+    console.log('ℹ️  socket.io-client not available, using polling only')
+  }
+
+  // Polling fallback (runs regardless of Socket.IO status)
+  console.log(`📡 Polling every ${Math.round(intervalMs / 1000)}s as fallback`)
 
   const shutdown = () => {
     console.log('\nWatch mode stopped.')
@@ -280,10 +339,12 @@ async function watchMode(client, runner, intervalMs) {
   process.on('SIGTERM', shutdown)
 
   while (true) {
-    try {
-      await runAll(client, runner)
-    } catch (err) {
-      console.error(`Poll error: ${err.message}`)
+    if (!busy) {
+      try {
+        await runAll(client, runner)
+      } catch (err) {
+        console.error(`Poll error: ${err.message}`)
+      }
     }
     await new Promise(resolve => setTimeout(resolve, intervalMs))
   }

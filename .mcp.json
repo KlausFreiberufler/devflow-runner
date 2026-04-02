@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "devflow": {
+      "command": "node",
+      "args": ["/Users/klaus/Documents/devflow-mcp/dist/index.js"],
+      "env": {
+        "DEVFLOW_URL": "https://api.app.dev-flow.tech"
+      }
+    }
+  }
+}
