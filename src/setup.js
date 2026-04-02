@@ -3,7 +3,7 @@ import { homedir } from 'os'
 import { join } from 'path'
 
 const CONFIG_DIR = join(homedir(), '.devflow')
-const CREDENTIALS_PATH = join(CONFIG_DIR, 'credentials.json')
+const CREDENTIALS_PATH = join(CONFIG_DIR, 'runner-credentials.json')
 const CONFIG_PATH = join(CONFIG_DIR, 'runner.json')
 
 export async function setup({ token, url }) {

@@ -3,7 +3,7 @@ import { homedir } from 'os'
 import { join } from 'path'
 
 const CONFIG_PATH = join(homedir(), '.devflow', 'runner.json')
-const CREDENTIALS_PATH = join(homedir(), '.devflow', 'credentials.json')
+const CREDENTIALS_PATH = join(homedir(), '.devflow', 'runner-credentials.json')
 
 export function loadConfig(overrides = {}) {
   const defaults = {
@@ -36,7 +36,7 @@ export function loadToken() {
     if (creds.accessToken) return creds.accessToken
   }
 
-  throw new Error('No DevFlow token found. Set DEVFLOW_TOKEN or run devflow-mcp setup first.')
+  throw new Error('No DevFlow token found. Set DEVFLOW_TOKEN or run devflow-runner setup first.')
 }
 
 export function loadProjectPaths() {
