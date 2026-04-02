@@ -19,71 +19,80 @@ export class Runner {
   }
 
   async runFlow(flowId) {
-    const init = await this.client.initSession(flowId)
-    const flow = init.flow || init
-    flow.tasks = init.tasks || []
-
-    await this.log.step('🚀', `Starting runner for ${flow.displayId}: "${flow.summary}"`)
-
-    let lastStepKey = null
-    let sameStepCount = 0
-    const MAX_SAME_STEP = 5
-
-    while (true) {
-      const step = await this.client.getNextStep(flowId)
-
-      // Loop protection: detect if we're stuck on the same step
-      const stepKey = `${step.flowState}:${step.pipelineStep}:${step.phase}`
-      if (stepKey === lastStepKey) {
-        sameStepCount++
-        if (sameStepCount >= MAX_SAME_STEP) {
-          await this.log.error(`Stuck on step ${stepKey} for ${MAX_SAME_STEP} iterations. Stopping.`)
-          break
-        }
-      } else {
-        sameStepCount = 0
-        lastStepKey = stepKey
-      }
-
-      if (step.flowState === 'done') {
-        await this.log.step('🎉', `Flow ${flow.displayId} completed!`)
-        break
-      }
-
-      if (step.gate?.blocked) {
-        const handled = await this.handleGate(step, flowId)
-        if (!handled) break
-        continue
-      }
-
-      if (step.actor === 'human' || step.actor === 'skip') {
-        await this.log.step('⏭', `Skipping step ${step.pipelineStep} (actor: ${step.actor})`)
-        await this.client.updateFlow(flowId, { phaseComplete: true })
-        continue
-      }
-
-      if (step.actor === 'auto' && step.kind === 'terminal') {
-        const stateMap = { approval: 'ready', ready: 'in_progress', review: 'done' }
-        const nextState = stateMap[step.flowState]
-        if (nextState) {
-          await this.log.step('⏭', `Auto-transition: ${step.flowState} → ${nextState}`)
-          await this.client.updateFlow(flowId, { currentState: nextState })
-        } else {
-          await this.log.step('⏭', `Skipping terminal step ${step.pipelineStep}`)
-          await this.client.updateFlow(flowId, { phaseComplete: true })
-        }
-        continue
-      }
-
-      await this.log.step('⚙️', `Step: ${step.pipelineStep} (phase: ${step.phase}, tool: ${this.adapter.name})`)
-      await this.executeStep(step, flow, flowId)
-
-      try { await this.client.touchActivity() } catch {}
+    let flow = null
+    try {
+      const init = await this.client.initSession(flowId)
+      flow = init.flow || init
+      flow.tasks = init.tasks || []
+    } catch (err) {
+      await this.log.error(`Failed to init session for ${flowId}: ${err.message}`)
+      return
     }
 
     try {
-      await this.client.completeSession(`Runner finished for ${flow.displayId}`)
-    } catch {}
+      await this.log.step('🚀', `Starting runner for ${flow.displayId}: "${flow.summary}"`)
+
+      let lastStepKey = null
+      let sameStepCount = 0
+      const MAX_SAME_STEP = 5
+
+      while (true) {
+        const step = await this.client.getNextStep(flowId)
+
+        // Loop protection: detect if we're stuck on the same step
+        const stepKey = `${step.flowState}:${step.pipelineStep}:${step.phase}`
+        if (stepKey === lastStepKey) {
+          sameStepCount++
+          if (sameStepCount >= MAX_SAME_STEP) {
+            await this.log.error(`Stuck on step ${stepKey} for ${MAX_SAME_STEP} iterations. Stopping.`)
+            break
+          }
+        } else {
+          sameStepCount = 0
+          lastStepKey = stepKey
+        }
+
+        if (step.flowState === 'done') {
+          await this.log.step('🎉', `Flow ${flow.displayId} completed!`)
+          break
+        }
+
+        if (step.gate?.blocked) {
+          const handled = await this.handleGate(step, flowId)
+          if (!handled) break
+          continue
+        }
+
+        if (step.actor === 'human' || step.actor === 'skip') {
+          await this.log.step('⏭', `Skipping step ${step.pipelineStep} (actor: ${step.actor})`)
+          await this.client.updateFlow(flowId, { phaseComplete: true })
+          continue
+        }
+
+        if (step.actor === 'auto' && step.kind === 'terminal') {
+          const stateMap = { approval: 'ready', ready: 'in_progress', review: 'done' }
+          const nextState = stateMap[step.flowState]
+          if (nextState) {
+            await this.log.step('⏭', `Auto-transition: ${step.flowState} → ${nextState}`)
+            await this.client.updateFlow(flowId, { currentState: nextState })
+          } else {
+            await this.log.step('⏭', `Skipping terminal step ${step.pipelineStep}`)
+            await this.client.updateFlow(flowId, { phaseComplete: true })
+          }
+          continue
+        }
+
+        await this.log.step('⚙️', `Step: ${step.pipelineStep} (phase: ${step.phase}, tool: ${this.adapter.name})`)
+        await this.executeStep(step, flow, flowId)
+
+        try { await this.client.touchActivity() } catch {}
+      }
+    } finally {
+      try {
+        await this.client.completeSession(`Runner finished for ${flow.displayId}`)
+      } catch {}
+      this.client.sessionId = null
+    }
   }
 
   async handleGate(step, flowId) {
@@ -150,7 +159,7 @@ export class Runner {
 
       const verifications = step.skill?.verificationsJson || []
       if (verifications.length > 0) {
-        const passed = await this.verifyAndRepair(step, flow, flowId, verifications, mcpConfigPath)
+        const passed = await this.verifyAndRepair(step, flow, flowId, verifications, mcpConfigPath, workingDir)
         if (!passed) return
       }
 
@@ -183,7 +192,7 @@ export class Runner {
     return false
   }
 
-  async verifyAndRepair(step, flow, flowId, verifications, mcpConfigPath) {
+  async verifyAndRepair(step, flow, flowId, verifications, mcpConfigPath, workingDir) {
     await this.log.step('🧪', 'Running verifications...')
     let checks = await this.verifier.run(verifications)
 
@@ -205,7 +214,7 @@ export class Runner {
       await this.adapter.spawn(repairPrompt, {
         model: step.skill?.agentModel || 'sonnet',
         mcpConfig: mcpConfigPath,
-        workingDir: process.cwd(),
+        workingDir: workingDir || process.cwd(),
       })
 
       checks = await this.verifier.run(verifications)

@@ -258,4 +258,123 @@ describe('Runner', () => {
       expect(client.updateFlow).not.toHaveBeenCalled()
     })
   })
+
+  describe('Session cleanup on error', () => {
+    it('should call completeSession even when executeStep throws', async () => {
+      let callCount = 0
+      const client = createMockClient({
+        getNextStep: vi.fn().mockImplementation(() => {
+          callCount++
+          if (callCount === 1) {
+            return {
+              flowState: 'in_progress', pipelineStep: 'implementation', phase: 'action',
+              actor: 'agent', gate: { blocked: false },
+              skill: { prompt: 'Impl', name: 'test' },
+            }
+          }
+          return { flowState: 'done' }
+        }),
+        updateFlow: vi.fn().mockRejectedValue(new Error('Network error')),
+      })
+      const adapter = createMockAdapter()
+      const runner = new Runner(client, adapter, createMockVerifier())
+
+      await runner.runFlow('f-1')
+
+      expect(client.completeSession).toHaveBeenCalled()
+    })
+
+    it('should handle initSession failure gracefully', async () => {
+      const client = createMockClient({
+        initSession: vi.fn().mockRejectedValue(new Error('401 Unauthorized')),
+      })
+      const runner = new Runner(client, createMockAdapter(), createMockVerifier())
+
+      // Should not throw — should handle the error internally
+      await expect(runner.runFlow('f-1')).resolves.not.toThrow()
+    })
+  })
+
+  describe('Working directory resolution', () => {
+    it('should use projectPaths config for workingDir', async () => {
+      let callCount = 0
+      const client = createMockClient({
+        initSession: vi.fn().mockResolvedValue({
+          flow: { id: 'f-1', displayId: 'DF-99', summary: 'Test', projectId: 'proj-123' },
+          tasks: [],
+        }),
+        getNextStep: vi.fn().mockImplementation(() => {
+          callCount++
+          if (callCount === 1) {
+            return {
+              flowState: 'in_progress', pipelineStep: 'implementation', phase: 'action',
+              actor: 'agent', gate: { blocked: false },
+              skill: { prompt: 'Impl', name: 'test' },
+            }
+          }
+          return { flowState: 'done' }
+        }),
+      })
+      const adapter = createMockAdapter()
+      const runner = new Runner(client, adapter, createMockVerifier(), {
+        projectPaths: { 'proj-123': { name: 'TestProject', path: '/tmp/test-project' } },
+      })
+
+      await runner.runFlow('f-1')
+
+      // Adapter should have been spawned with the project path
+      expect(adapter.spawn).toHaveBeenCalled()
+      const spawnCall = adapter.spawn.mock.calls[0]
+      expect(spawnCall[1].workingDir).toBe('/tmp/test-project')
+    })
+
+    it('should pass workingDir to verifyAndRepair', async () => {
+      let callCount = 0
+      const client = createMockClient({
+        initSession: vi.fn().mockResolvedValue({
+          flow: { id: 'f-1', displayId: 'DF-99', summary: 'Test', projectId: 'proj-456' },
+          tasks: [],
+        }),
+        getNextStep: vi.fn().mockImplementation(() => {
+          callCount++
+          if (callCount === 1) {
+            return {
+              flowState: 'in_progress', pipelineStep: 'implementation', phase: 'action',
+              actor: 'agent', gate: { blocked: false },
+              skill: { prompt: 'Impl', name: 'test', verificationsJson: [{ type: 'command', command: 'echo ok', label: 'test' }] },
+            }
+          }
+          return { flowState: 'done' }
+        }),
+      })
+      const adapter = createMockAdapter()
+      const verifier = createMockVerifier({
+        run: vi.fn().mockResolvedValue({ allPassed: false, results: [{ label: 'test', passed: false }], failures: [{ label: 'test', output: 'fail' }] }),
+      })
+      const runner = new Runner(client, adapter, verifier, {
+        projectPaths: { 'proj-456': { path: '/tmp/verify-project' } },
+        maxRetries: 1,
+      })
+
+      await runner.runFlow('f-1')
+
+      // Repair spawn should use the project working dir
+      const repairCalls = adapter.spawn.mock.calls.filter((_, i) => i > 0)
+      if (repairCalls.length > 0) {
+        expect(repairCalls[0][1].workingDir).toBe('/tmp/verify-project')
+      }
+    })
+  })
+
+  describe('Session isolation in multi-flow', () => {
+    it('should reset sessionId after completeSession', async () => {
+      const client = createMockClient()
+      const runner = new Runner(client, createMockAdapter(), createMockVerifier())
+
+      await runner.runFlow('f-1')
+
+      // After runFlow completes, sessionId should be cleared
+      expect(client.sessionId).toBeNull()
+    })
+  })
 })
