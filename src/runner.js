@@ -34,9 +34,17 @@ export class Runner {
 
       let lastStepKey = null
       let sameStepCount = 0
+      let totalIterations = 0
       const MAX_SAME_STEP = 5
+      const MAX_TOTAL_ITERATIONS = 20
 
       while (true) {
+        totalIterations++
+        if (totalIterations > MAX_TOTAL_ITERATIONS) {
+          await this.log.error(`Total iteration limit (${MAX_TOTAL_ITERATIONS}) reached. Stopping.`)
+          break
+        }
+
         const step = await this.client.getNextStep(flowId)
 
         // Loop protection: detect if we're stuck on the same step
@@ -328,21 +336,25 @@ async function watchMode(client, runner, intervalMs) {
   console.log(`Watch mode started. Press Ctrl+C to stop.`)
 
   let socketConnected = false
-  let busy = false
+  const activeFlows = new Set()
 
   const executeFlow = async (flowId) => {
-    if (busy) {
-      console.log(`⏳ Already executing a flow, skipping ${flowId}`)
+    if (activeFlows.has(flowId)) {
+      console.log(`⏳ Flow ${flowId} already running, skipping`)
       return
     }
-    busy = true
+    if (activeFlows.size > 0) {
+      console.log(`⏳ Already executing a flow, queuing ${flowId}`)
+      return
+    }
+    activeFlows.add(flowId)
     try {
       await runner.runFlow(flowId)
       await client.completeRunnerRequest(flowId).catch(() => {})
     } catch (err) {
       console.error(`Failed: ${flowId} — ${err.message}`)
     }
-    busy = false
+    activeFlows.delete(flowId)
   }
 
   // Try Socket.IO connection for push-based job delivery
@@ -394,7 +406,7 @@ async function watchMode(client, runner, intervalMs) {
   process.on('SIGTERM', shutdown)
 
   while (true) {
-    if (!busy) {
+    if (activeFlows.size === 0) {
       try {
         await runAll(client, runner)
       } catch (err) {
