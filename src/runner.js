@@ -18,7 +18,10 @@ export class Runner {
     this.log = new Logger(client)
   }
 
-  async runFlow(flowId) {
+  async runFlow(flowId, { executorMode } = {}) {
+    // DF-449 — auth mode for the spawned `claude` CLI: 'claude-cli' (subscription/
+    // Max, default) or 'api-key' (metered). Threaded into every adapter.spawn.
+    this.executorMode = executorMode || 'claude-cli'
     let flow = null
     try {
       const init = await this.client.initSession(flowId)
@@ -154,7 +157,15 @@ export class Runner {
         model: step.skill?.agentModel || 'sonnet',
         mcpConfig: mcpConfigPath,
         workingDir,
+        executorMode: this.executorMode,
       })
+
+      // DF-449 — rate-limit is not silent progress: stop and leave the flow
+      // where it is for a human/resume instead of looping.
+      if (this.adapter.isRateLimited?.(result)) {
+        await this.log.error(`${this.adapter.name} hit a rate/usage limit — stopping. Flow ${flow.displayId} stays for a human to resume.`)
+        return
+      }
 
       if (result.exitCode !== 0) {
         const errSnippet = (result.stderr || result.stdout || '').slice(-500)
@@ -221,6 +232,7 @@ export class Runner {
         model: step.skill?.agentModel || 'sonnet',
         mcpConfig: mcpConfigPath,
         workingDir: workingDir || process.cwd(),
+        executorMode: this.executorMode,
       })
 
       checks = await this.verifier.run(verifications)
@@ -336,7 +348,7 @@ async function watchMode(client, runner, intervalMs) {
   let socketConnected = false
   const activeFlows = new Set()
 
-  const executeFlow = async (flowId) => {
+  const executeFlow = async (flowId, executorMode) => {
     if (activeFlows.has(flowId)) {
       console.log(`⏳ Flow ${flowId} already running, skipping`)
       return
@@ -347,7 +359,7 @@ async function watchMode(client, runner, intervalMs) {
     }
     activeFlows.add(flowId)
     try {
-      await runner.runFlow(flowId)
+      await runner.runFlow(flowId, { executorMode })
       await client.completeRunnerRequest(flowId).catch(() => {})
     } catch (err) {
       console.error(`Failed: ${flowId} — ${err.message}`)
@@ -379,9 +391,9 @@ async function watchMode(client, runner, intervalMs) {
       console.log(`🔌 Disconnected: ${reason}. Reconnecting...`)
     })
 
-    socket.on('runner:execute', async ({ flowId, displayId, summary }) => {
-      console.log(`\n📥 Job received: ${displayId || flowId} — ${summary || ''}`)
-      await executeFlow(flowId)
+    socket.on('runner:execute', async ({ flowId, displayId, summary, executorMode }) => {
+      console.log(`\n📥 Job received: ${displayId || flowId} — ${summary || ''}${executorMode ? ` [${executorMode}]` : ''}`)
+      await executeFlow(flowId, executorMode)
     })
 
     socket.on('connect_error', (err) => {
