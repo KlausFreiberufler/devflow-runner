@@ -50,3 +50,21 @@ export function nextRunnerStatus(current, line) {
   if (/Watch mode started|Polling every/i.test(text)) return 'running'
   return cur
 }
+
+/**
+ * DF-455 — merge the server's project list with the locally-configured paths
+ * into a display list. `projects` = [{id,name}], `paths` = {id:{name,path}}.
+ * Null-safe; ignores malformed entries; never throws.
+ * @returns {{id:string, name:string, path:string|null}[]}
+ */
+export function mergeProjectPaths(projects, paths) {
+  const list = Array.isArray(projects) ? projects : []
+  const map = paths && typeof paths === 'object' ? paths : {}
+  return list
+    .filter(p => p && p.id != null)
+    .map(p => ({
+      id: String(p.id),
+      name: p.name || p.id,
+      path: (map[p.id] && typeof map[p.id].path === 'string' && map[p.id].path) ? map[p.id].path : null,
+    }))
+}
