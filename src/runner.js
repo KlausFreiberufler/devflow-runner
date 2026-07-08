@@ -1,6 +1,7 @@
 import { buildPrompt, buildRepairPrompt } from './prompt-builder.js'
 import { Logger } from './utils/logger.js'
 import { generateMcpConfig, cleanupMcpConfig } from './utils/mcp-config.js'
+import { shouldFanOut, runFanOut } from './fanoutLoop.js'
 
 const REVIEW_STEPS = ['approval', 'code_review', 'testing']
 
@@ -151,14 +152,25 @@ export class Runner {
       mcpServerCommand: this.mcpServerCommand,
     })
 
+    // DF-452 — fan-out: on the implementation step, if the flow decomposes into
+    // per-task specs, run one scoped worker per task instead of one monolithic
+    // agent. Otherwise (and for every other step) the single-spawn path below is
+    // unchanged (no regression).
+    let plan = null
+    if (step.pipelineStep === 'implementation') {
+      try { plan = await this.client.getFanoutPlan(flowId) } catch { plan = null }
+    }
+
     await this.log.step('🤖', `Spawning ${this.adapter.name} in ${workingDir}...`)
     try {
-      const result = await this.adapter.spawn(prompt, {
-        model: step.skill?.agentModel || 'sonnet',
-        mcpConfig: mcpConfigPath,
-        workingDir,
-        executorMode: this.executorMode,
-      })
+      const result = shouldFanOut(plan)
+        ? await this.runFanOutImplementation(plan, step, mcpConfigPath, workingDir)
+        : await this.adapter.spawn(prompt, {
+            model: step.skill?.agentModel || 'sonnet',
+            mcpConfig: mcpConfigPath,
+            workingDir,
+            executorMode: this.executorMode,
+          })
 
       // DF-449 — rate-limit is not silent progress: stop and leave the flow
       // where it is for a human/resume instead of looping.
@@ -198,6 +210,47 @@ export class Runner {
       }
     } finally {
       cleanupMcpConfig(mcpConfigPath)
+    }
+  }
+
+  /**
+   * DF-452 — run one scoped worker per task (sequential). Reuses the adapter +
+   * executorMode; one repair retry per worker; a rate-limit or a still-failing
+   * worker stops the fan-out. Returns a synthetic spawn-result so the shared
+   * verify/advance tail in executeStep handles success/failure uniformly.
+   */
+  async runFanOutImplementation(plan, step, mcpConfigPath, workingDir) {
+    const model = step.skill?.agentModel || 'sonnet'
+    const specs = plan.specs
+    await this.log.step('🧩', `Fan-out: ${specs.length} scoped worker(s), one per task`)
+    let rateLimited = false
+
+    const runWorker = async (spec) => {
+      const spawnOpts = { model, mcpConfig: mcpConfigPath, workingDir, executorMode: this.executorMode }
+      await this.log.step('🤖', `Worker: ${spec.title}`)
+      let res = await this.adapter.spawn(spec.scopedPrompt, spawnOpts)
+      if (this.adapter.isRateLimited?.(res)) { rateLimited = true; return { taskId: spec.taskId, ok: false, reason: 'rate_limited' } }
+      if (res.exitCode !== 0) {
+        await this.log.step('🔄', `Worker "${spec.title}" failed (exit ${res.exitCode}) — one retry`)
+        res = await this.adapter.spawn(
+          `${spec.scopedPrompt}\n\nThe previous attempt failed. Fix it and complete ONLY this task.`,
+          spawnOpts,
+        )
+        if (this.adapter.isRateLimited?.(res)) { rateLimited = true; return { taskId: spec.taskId, ok: false, reason: 'rate_limited' } }
+      }
+      return { taskId: spec.taskId, ok: res.exitCode === 0, reason: res.exitCode === 0 ? undefined : `exit ${res.exitCode}` }
+    }
+
+    const syn = await runFanOut({ specs, runWorker, maxFailures: 1 })
+    if (syn.allDone) {
+      await this.log.step('✅', `Fan-out complete: ${syn.completed.length}/${specs.length} worker(s) ok`)
+    } else {
+      await this.log.error(`Fan-out stopped — ${syn.failed.length} failed. Flow stays for a human.`)
+    }
+    return {
+      exitCode: syn.allDone ? 0 : 1,
+      stdout: `fan-out ${syn.completed.length}/${specs.length} ok`,
+      stderr: rateLimited ? 'rate limit hit during fan-out' : '',
     }
   }
 

@@ -190,6 +190,16 @@ export class DevFlowClient {
   }
 
   /**
+   * DF-452 — fetch the conductor fan-out plan (DF-451). Returns { mode, specs }.
+   * @param {string} flowId
+   * @returns {Promise<{mode:string, specs:any[]}>}
+   */
+  async getFanoutPlan(flowId) {
+    const res = await this.request('GET', `/api/flows/${flowId}/fanout-plan`);
+    return (res && res.data) ? res.data : res;
+  }
+
+  /**
    * Partially update a flow (state transition, plan, summary, etc.).
    *
    * @param {string} flowId
