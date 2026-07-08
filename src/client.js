@@ -200,6 +200,16 @@ export class DevFlowClient {
   }
 
   /**
+   * DF-455 — runner status incl. the projects this runner is scoped to.
+   * Uses /api/runner/status (runner-token authorized) instead of /api/projects.
+   * @returns {Promise<{installed:boolean, online:boolean, enabledProjects:{projectId:string,projectName:string,enabled:boolean}[]}>}
+   */
+  async getRunnerStatus() {
+    const res = await this.request('GET', '/api/runner/status');
+    return (res && res.data) ? res.data : res;
+  }
+
+  /**
    * Partially update a flow (state transition, plan, summary, etc.).
    *
    * @param {string} flowId

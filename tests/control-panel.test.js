@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { createLogBuffer, sseFormat, nextRunnerStatus } from '../control-panel/panelLogic.js'
+import { createLogBuffer, sseFormat, nextRunnerStatus, mergeProjectPaths } from '../control-panel/panelLogic.js'
 
 describe('control-panel panelLogic (DF-454)', () => {
   describe('createLogBuffer', () => {
@@ -45,6 +45,26 @@ describe('control-panel panelLogic (DF-454)', () => {
       expect(nextRunnerStatus('connected', '📥 Job received: DF-1')).toBe('connected')
       expect(nextRunnerStatus(undefined, undefined)).toBe('idle')
       expect(() => nextRunnerStatus(null, null)).not.toThrow()
+    })
+  })
+
+  describe('mergeProjectPaths (DF-455)', () => {
+    it('merges projects with configured paths; missing path → null', () => {
+      const projects = [{ id: 'p1', name: 'Alpha' }, { id: 'p2', name: 'Beta' }]
+      const paths = { p1: { name: 'Alpha', path: '/repos/alpha' } }
+      expect(mergeProjectPaths(projects, paths)).toEqual([
+        { id: 'p1', name: 'Alpha', path: '/repos/alpha' },
+        { id: 'p2', name: 'Beta', path: null },
+      ])
+    })
+    it('falls back to id when name missing; ignores malformed entries', () => {
+      const out = mergeProjectPaths([{ id: 'p1' }, null, { name: 'noid' }], {})
+      expect(out).toEqual([{ id: 'p1', name: 'p1', path: null }])
+    })
+    it('null-safe; never throws', () => {
+      expect(mergeProjectPaths(null, null)).toEqual([])
+      expect(() => mergeProjectPaths(undefined, undefined)).not.toThrow()
+      expect(mergeProjectPaths([{ id: 'p1', name: 'A' }], { p1: {} })).toEqual([{ id: 'p1', name: 'A', path: null }])
     })
   })
 })

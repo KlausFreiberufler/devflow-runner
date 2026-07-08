@@ -1,7 +1,7 @@
 import http from 'node:http'
 import { spawn } from 'node:child_process'
 import { join } from 'node:path'
-import { createLogBuffer, sseFormat, nextRunnerStatus } from './panelLogic.js'
+import { createLogBuffer, sseFormat, nextRunnerStatus, mergeProjectPaths } from './panelLogic.js'
 
 /**
  * DF-454 — local control panel for the DevFlow runner.
@@ -125,6 +125,52 @@ export function startPanel({ port = 7420, runnerRoot = process.cwd() } = {}) {
       return
     }
 
+    // DF-455 — list projects (from the API) merged with local paths. Robust:
+    // no token / offline → { ok:false, error } (never a hard 500).
+    if (req.method === 'GET' && url.pathname === '/projects') {
+      try {
+        const cfg = await import('../src/utils/config.js')
+        const { DevFlowClient } = await import('../src/client.js')
+        const conf = cfg.loadConfig()
+        const client = new DevFlowClient(conf.apiUrl, cfg.loadToken())
+        // /api/runner/status is runner-token authorized and returns exactly the
+        // projects this runner is scoped to (unlike /api/projects, which the
+        // runner token cannot list).
+        const st = await client.getRunnerStatus()
+        const projects = (st?.enabledProjects || []).map(p => ({ id: p.projectId, name: p.projectName }))
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: true, projects: mergeProjectPaths(projects, cfg.loadProjectPaths()) }))
+      } catch (err) {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: false, error: err.message, projects: [] }))
+      }
+      return
+    }
+
+    // DF-455 — set the local working directory for a project.
+    if (req.method === 'POST' && url.pathname === '/project-path') {
+      let body = ''
+      req.on('data', (c) => { body += c; if (body.length > 1e5) req.destroy() })
+      req.on('end', async () => {
+        try {
+          const { projectId, projectName, path } = JSON.parse(body || '{}')
+          if (!projectId || !path || !String(path).trim()) {
+            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ ok: false, error: 'projectId and non-empty path required' }))
+            return
+          }
+          const cfg = await import('../src/utils/config.js')
+          cfg.saveProjectPath(projectId, projectName || projectId, String(path).trim())
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ ok: true, path: String(path).trim() }))
+        } catch (err) {
+          res.writeHead(500, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ ok: false, error: err.message }))
+        }
+      })
+      return
+    }
+
     res.writeHead(404, { 'Content-Type': 'text/plain' })
     res.end('Not found')
   })
@@ -139,7 +185,7 @@ const PAGE = `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <title>DevFlow Runner</title>
 <style>
   :root { color-scheme: light dark; }
-  body { font: 14px/1.5 -apple-system, system-ui, sans-serif; margin: 0; background: #0f1115; color: #e6e6e6; }
+  body { font: 14px/1.5 -apple-system, system-ui, sans-serif; margin: 0; background: #0f1115; color: #e6e6e6; display: flex; flex-direction: column; height: 100vh; }
   header { display: flex; align-items: center; gap: 12px; padding: 14px 18px; border-bottom: 1px solid #262b33; background: #151922; position: sticky; top: 0; }
   h1 { font-size: 15px; margin: 0; font-weight: 600; }
   .dot { width: 10px; height: 10px; border-radius: 50%; background: #6b7280; box-shadow: 0 0 0 3px rgba(107,114,128,.15); }
@@ -153,7 +199,15 @@ const PAGE = `<!doctype html><html lang="en"><head><meta charset="utf-8">
   button:disabled { opacity: .45; cursor: not-allowed; }
   #start { border-color: #1f7a44; } #stop { border-color: #7a2a2a; }
   pre { margin: 0; padding: 14px 18px; white-space: pre-wrap; word-break: break-word; font: 12px/1.5 ui-monospace, Menlo, monospace; }
-  #log { height: calc(100vh - 52px); overflow-y: auto; }
+  #log { flex: 1; overflow-y: auto; }
+  details.projects { border-bottom: 1px solid #262b33; background: #12151c; }
+  details.projects > summary { cursor: pointer; padding: 10px 18px; font-weight: 600; font-size: 13px; }
+  .proj { display: flex; align-items: center; gap: 8px; padding: 6px 18px; }
+  .proj .pname { width: 160px; flex-shrink: 0; color: #b9c0cc; }
+  .proj input { flex: 1; font: inherit; padding: 5px 8px; border-radius: 6px; border: 1px solid #2f3742; background: #0f1115; color: #e6e6e6; }
+  .proj button { padding: 5px 12px; }
+  .proj .saved { color: #22c55e; font-size: 12px; }
+  #projErr { padding: 6px 18px; color: #f59e0b; font-size: 12px; }
 </style></head><body>
 <header>
   <span class="dot" id="dot"></span>
@@ -163,6 +217,11 @@ const PAGE = `<!doctype html><html lang="en"><head><meta charset="utf-8">
   <button id="start">Start</button>
   <button id="stop" disabled>Stop</button>
 </header>
+<details class="projects" open>
+  <summary>Projects — working directories</summary>
+  <div id="projErr" hidden></div>
+  <div id="projList"></div>
+</details>
 <div id="log"><pre id="pre"></pre></div>
 <script>
   const pre = document.getElementById('pre');
@@ -192,5 +251,33 @@ const PAGE = `<!doctype html><html lang="en"><head><meta charset="utf-8">
   };
   startBtn.onclick = () => fetch('/start', { method: 'POST' });
   stopBtn.onclick = () => fetch('/stop', { method: 'POST' });
+
+  // DF-455 — projects / working-directory editor
+  const projList = document.getElementById('projList');
+  const projErr = document.getElementById('projErr');
+  async function loadProjects() {
+    try {
+      const r = await fetch('/projects').then(x => x.json());
+      if (!r.ok) { projErr.hidden = false; projErr.textContent = 'Could not load projects: ' + (r.error || 'unknown') + ' (run setup first?)'; projList.innerHTML = ''; return; }
+      projErr.hidden = true;
+      projList.innerHTML = '';
+      for (const p of r.projects) {
+        const row = document.createElement('div');
+        row.className = 'proj';
+        const name = document.createElement('span'); name.className = 'pname'; name.textContent = p.name;
+        const input = document.createElement('input'); input.value = p.path || ''; input.placeholder = 'local repo path, e.g. /Users/you/repo';
+        const btn = document.createElement('button'); btn.textContent = 'Save';
+        const ok = document.createElement('span'); ok.className = 'saved';
+        btn.onclick = async () => {
+          ok.textContent = '';
+          const res = await fetch('/project-path', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectId: p.id, projectName: p.name, path: input.value }) }).then(x => x.json()).catch(() => ({ ok: false }));
+          ok.textContent = res.ok ? '✓ saved' : '✗ ' + (res.error || 'failed');
+        };
+        row.append(name, input, btn, ok);
+        projList.appendChild(row);
+      }
+    } catch (e) { projErr.hidden = false; projErr.textContent = 'Could not load projects.'; }
+  }
+  loadProjects();
 </script>
 </body></html>`
