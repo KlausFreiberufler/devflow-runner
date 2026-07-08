@@ -69,6 +69,57 @@ describe('Runner', () => {
       expect(client.updateFlow).toHaveBeenCalledWith('f-1', { phaseComplete: true })
     })
 
+    // DF-449 — executorMode threading + rate-limit halt
+    function oneWorkStepClient() {
+      let n = 0
+      return createMockClient({
+        getNextStep: vi.fn().mockImplementation(() => {
+          n++
+          if (n === 1) {
+            return {
+              flowState: 'in_progress', pipelineStep: 'implementation', phase: 'action',
+              actor: 'agent', gate: { blocked: false }, transitionPolicy: 'human_or_agent',
+              skill: { prompt: 'Implement', name: 'executing-plans', agentModel: 'sonnet' },
+            }
+          }
+          return { flowState: 'done' }
+        }),
+      })
+    }
+
+    it('threads executorMode into adapter.spawn (DF-449)', async () => {
+      const adapter = createMockAdapter()
+      const runner = new Runner(oneWorkStepClient(), adapter, createMockVerifier())
+
+      await runner.runFlow('f-1', { executorMode: 'api-key' })
+
+      expect(adapter.spawn).toHaveBeenCalledTimes(1)
+      expect(adapter.spawn.mock.calls[0][1].executorMode).toBe('api-key')
+    })
+
+    it('defaults executorMode to claude-cli (DF-449)', async () => {
+      const adapter = createMockAdapter()
+      const runner = new Runner(oneWorkStepClient(), adapter, createMockVerifier())
+
+      await runner.runFlow('f-1')
+
+      expect(adapter.spawn.mock.calls[0][1].executorMode).toBe('claude-cli')
+    })
+
+    it('halts without advancing when the adapter reports rate-limited (DF-449)', async () => {
+      const client = oneWorkStepClient()
+      const adapter = createMockAdapter({
+        spawn: vi.fn().mockResolvedValue({ exitCode: 0, stdout: 'Error: rate limit exceeded', stderr: '' }),
+        isRateLimited: (r) => /rate.?limit/i.test(`${r?.stdout || ''}${r?.stderr || ''}`),
+      })
+      const runner = new Runner(client, adapter, createMockVerifier())
+
+      await runner.runFlow('f-1')
+
+      expect(adapter.spawn).toHaveBeenCalledTimes(1)
+      expect(client.updateFlow).not.toHaveBeenCalledWith('f-1', { phaseComplete: true })
+    })
+
     it('should skip steps with actor human/skip/auto', async () => {
       let callCount = 0
       const client = createMockClient({
