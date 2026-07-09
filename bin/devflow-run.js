@@ -79,32 +79,6 @@ program
   })
 
 program
-  .command('panel')
-  .description('Open a local control panel (browser) to start/stop the runner and watch its output')
-  .option('--port <port>', 'Port for the local panel', '7420')
-  .action(async (options) => {
-    try {
-      const { fileURLToPath } = await import('node:url')
-      const { dirname, resolve } = await import('node:path')
-      const { spawn } = await import('node:child_process')
-      const { startPanel } = await import('../control-panel/server.js')
-
-      const runnerRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-      const port = Number(options.port) || 7420
-      const { url } = startPanel({ port, runnerRoot })
-      console.log(`🕹  DevFlow Runner control panel: ${url}`)
-      console.log('   Press Ctrl+C to stop the panel.')
-
-      // Best-effort: open the browser (macOS `open`, Linux `xdg-open`).
-      const opener = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open'
-      try { spawn(opener, [url], { stdio: 'ignore', detached: true }).unref() } catch { /* no browser — URL is printed */ }
-    } catch (err) {
-      console.error('❌', err.message)
-      process.exit(1)
-    }
-  })
-
-program
   .command('run [flow-id]', { isDefault: true })
   .description('Run a specific flow or pick interactively')
   .option('--all', 'Run all flows with runner_requested flag')
