@@ -1,3 +1,5 @@
 node_modules/
 *.tgz
 .claude/settings.local.json
+CLAUDE.md
+.devflow-active
